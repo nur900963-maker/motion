@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Preset contoh bawaan Xmotion. Struktur mengikuti format proyek Alight Motion
+     (project > scene > layer > property > kf). Dipakai sebagai demo yang benar-benar
+     diparse oleh parser yang sama dengan file unggahan pengguna. -->
+<project name="Xmotion Demo — Neon Pulse" width="720" height="1280" fps="60" duration="6000">
+  <scene name="Neon Pulse" width="720" height="1280" fps="60" duration="6000">
+    <layer id="bg" label="Latar Gradien" type="shape" startTime="0" endTime="6000" visible="true">
+      <property name="location" value="360,640"/>
+      <property name="size" value="720,1280"/>
+      <property name="color" value="#0a0f1e"/>
+      <property name="opacity">
+        <kf t="0" v="1"/>
+        <kf t="3000" v="0.85"/>
+        <kf t="6000" v="1"/>
+      </property>
+    </layer>
+
+    <layer id="photo" label="Slot Foto" type="image" startTime="0" endTime="6000" visible="true" src="slot-1">
+      <property name="location" value="360,300"/>
+      <property name="size" value="220,220"/>
+      <property name="scale">
+        <kf t="0" v="1,1"/>
+        <kf t="3000" v="1.08,1.08"/>
+        <kf t="6000" v="1,1"/>
+      </property>
+      <property name="opacity" value="1"/>
+    </layer>
+
+    <layer id="ring1" label="Cincin Neon" type="shape" startTime="0" endTime="6000" visible="true">
+      <property name="location">
+        <kf t="0" v="360,640"/>
+        <kf t="1500" v="360,600"/>
+        <kf t="3000" v="360,640"/>
+        <kf t="4500" v="360,680"/>
+        <kf t="6000" v="360,640"/>
+      </property>
+      <property name="size" value="420,420"/>
+      <property name="scale">
+        <kf t="0" v="0.6,0.6"/>
+        <kf t="2000" v="1.15,1.15"/>
+        <kf t="4000" v="0.85,0.85"/>
+        <kf t="6000" v="0.6,0.6"/>
+      </property>
+      <property name="rotation">
+        <kf t="0" v="0"/>
+        <kf t="6000" v="360"/>
+      </property>
+      <property name="color" value="#1fc8ee"/>
+      <property name="opacity" value="0.9"/>
+      <effect id="com.alightcreative.effects.glow" name="Glow" enabled="true"/>
+    </layer>
+
+    <layer id="ring2" label="Cincin Dalam" type="shape" startTime="500" endTime="6000" visible="true">
+      <property name="location" value="360,640"/>
+      <property name="size" value="260,260"/>
+      <property name="rotation">
+        <kf t="0" v="360"/>
+        <kf t="6000" v="0"/>
+      </property>
+      <property name="color" value="#ff4d8d"/>
+      <property name="opacity" value="0.75"/>
+    </layer>
+
+    <layer id="title" label="Judul" type="text" startTime="300" endTime="6000" visible="true">
+      <property name="location" value="360,980"/>
+      <property name="text" value="XMOTION"/>
+      <property name="color" value="#ededeb"/>
+      <property name="opacity">
+        <kf t="300" v="0"/>
+        <kf t="1200" v="1"/>
+        <kf t="5200" v="1"/>
+        <kf t="6000" v="0"/>
+      </property>
+      <property name="scale">
+        <kf t="300" v="0.8,0.8"/>
+        <kf t="1200" v="1,1"/>
+      </property>
+    </layer>
+
+    <layer id="sub" label="Subjudul" type="text" startTime="900" endTime="6000" visible="true">
+      <property name="location" value="360,1060"/>
+      <property name="text" value="Preset AM Player"/>
+      <property name="color" value="#8b93a7"/>
+      <property name="opacity">
+        <kf t="900" v="0"/>
+        <kf t="1800" v="1"/>
+        <kf t="5200" v="1"/>
+        <kf t="6000" v="0"/>
+      </property>
+    </layer>
+
+
+    <layer id="audio1" label="Track Audio 1" type="audio" startTime="0" endTime="6000" visible="true" src="audio-1">
+      <property name="opacity" value="1"/>
+    </layer>
+  </scene>
+</project>
