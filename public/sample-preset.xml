@@ -1,0 +1,64 @@
+<?xml version='1.0' encoding='UTF-8' ?>
+<scene title="Contoh Xmotion" width="1080" height="1920" fps="30" totalTime="4000" bgcolor="#ff0b1020">
+  <bookmark t="2000" />
+  <shape id="1" label="Latar gradien" startTime="0" endTime="4000" fillType="gradient" s=".rect">
+    <transform>
+      <location value="540.000000,960.000000,0.000000" />
+    </transform>
+    <property name="size" type="vec2" value="1080.000000,1920.000000" />
+    <gradient type="linear" startColor="#ff1b2a6b" endColor="#ff0b0b14" start="0.5,0.0" end="0.5,1.0" />
+  </shape>
+  <shape id="2" label="Kotak berputar" startTime="300" endTime="3700" fillType="color" s=".roundrect">
+    <transform>
+      <location>
+        <kf t="0.000000" v="540.000000,1400.000000,0.000000" />
+        <kf t="0.500000" v="540.000000,960.000000,0.000000" e="cubicBezier 0.0 0.0 0.2 1.0" />
+        <kf t="1.000000" v="540.000000,520.000000,0.000000" e="cubicBezier 0.8 0.0 1.0 1.0" />
+      </location>
+      <scale>
+        <kf t="0.000000" v="0.400000,0.400000" />
+        <kf t="0.500000" v="1.000000,1.000000" e="cubicBezier 0.0 0.0 0.2 1.0" />
+        <kf t="1.000000" v="0.400000,0.400000" e="cubicBezier 0.8 0.0 1.0 1.0" />
+      </scale>
+      <rotation>
+        <kf t="0.000000" v="0.000000" />
+        <kf t="1.000000" v="180.000000" />
+      </rotation>
+      <opacity>
+        <kf t="0.000000" v="0.000000" />
+        <kf t="0.150000" v="1.000000" e="cubicBezier 0.42 0.0 1.0 1.0" />
+        <kf t="0.850000" v="1.000000" />
+        <kf t="1.000000" v="0.000000" e="cubicBezier 0.42 0.0 1.0 1.0" />
+      </opacity>
+    </transform>
+    <property name="size" type="vec2" value="420.000000,420.000000" />
+    <property name="cornerRadius" type="float" value="60.000000" />
+    <fillColor value="#ff1fc8ee" />
+  </shape>
+  <shape id="3" label="Lingkaran" startTime="1000" endTime="4000" fillType="color" s=".circle" blending="linear-dodge">
+    <transform>
+      <location value="540.000000,1500.000000,0.000000" />
+      <scale>
+        <kf t="0.000000" v="0.200000,0.200000" />
+        <kf t="1.000000" v="1.000000,1.000000" e="cubicBezier 0.0 0.0 0.2 1.0" />
+      </scale>
+    </transform>
+    <property name="size" type="vec2" value="300.000000,300.000000" />
+    <fillColor value="#99ff5fa0" />
+  </shape>
+  <shape id="4" label="Slot foto" startTime="0" endTime="4000" fillType="media" fillImage="content://media/external/images/media/1" mediaFillMode="fill" s=".roundrect">
+    <transform>
+      <location value="540.000000,960.000000,0.000000" />
+      <opacity>
+        <kf t="0.000000" v="0.000000" />
+        <kf t="0.250000" v="1.000000" e="cubicBezier 0.42 0.0 1.0 1.0" />
+      </opacity>
+    </transform>
+    <property name="size" type="vec2" value="720.000000,720.000000" />
+    <property name="cornerRadius" type="float" value="40.000000" />
+    <effect id="com.alightcreative.effects.satvib" locallyApplied="false">
+      <property name="saturation" type="float" value="1.250000" />
+      <property name="vib" type="float" value="1.000000" />
+    </effect>
+  </shape>
+</scene>
