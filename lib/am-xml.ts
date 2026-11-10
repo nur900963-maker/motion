@@ -1,0 +1,580 @@
+import { XMLParser } from 'fast-xml-parser';
+import type { EffectParam, Keyframe, Layer, LayerEffect, LayerType, MediaInfo, Scene } from './types';
+
+export type { Keyframe, Layer, LayerType, Scene } from './types';
+
+/**
+ * Parser XML Alight Motion ("Export Project Package (XML)").
+ *
+ * Struktur yang dibaca dibangun dari file ekspor Alight Motion asli (bukan dari dokumentasi
+ * resmi — formatnya tidak dipublikasikan):
+ *
+ *   <scene title width height fps totalTime bgcolor ...>
+ *     <bookmark t="ms"/>
+ *     <audio|shape|video|image ... id label startTime endTime ...>
+ *       <transform><location|scale|rotation|opacity> (value="..." atau <kf t v e/>) </transform>
+ *       <property name="size" type="vec2" value="w,h"/> · <fillColor value/> · <gradient .../>
+ *       <effect id="com.alightcreative.effects.*"><property name type value|<kf>/></effect>
+ *     </...>
+ *   </scene>
+ *
+ * Hal yang terbukti dari data:
+ *  - `t` pada <kf> adalah FRAKSI durasi layer (0 = startTime, 1 = endTime), boleh di luar 0..1,
+ *    dan urutannya di file tidak berurutan → di sini dikonversi ke ms dan diurutkan.
+ *  - `e="cubicBezier x1 y1 x2 y2"` berlaku untuk segmen yang MASUK ke keyframe itu.
+ *  - Urutan elemen di file = urutan tumpukan layer (yang pertama paling bawah).
+ *  - Media dirujuk dengan URI Android (content://...), yang tidak bisa dibuka di web; pengguna
+ *    memasang media sendiri ke slot.
+ *
+ * Parser TIDAK mengarang nilai: yang tidak dikenali dicatat di `warnings`.
+ */
+
+export class XmlError extends Error {}
+
+/** Pohon elemen sederhana yang mempertahankan urutan dokumen. */
+type El = { tag: string; attrs: Record<string, string>; children: El[] };
+
+const LAYER_TAGS: Record<string, LayerType> = {
+  shape: 'shape',
+  video: 'video',
+  image: 'image',
+  audio: 'audio',
+  text: 'text',
+  group: 'group',
+  embed: 'scene',
+  scene: 'scene',
+  precomp: 'scene',
+  embedscene: 'scene',
+  nullobj: 'null',
+  camera: 'other',
+  null: 'null',
+};
+const CONTAINER_TAGS = new Set(['group']);
+
+const BLEND_MAP: Record<string, string> = {
+  normal: 'source-over',
+  'linear-dodge': 'lighter',
+  add: 'lighter',
+  multiply: 'multiply',
+  screen: 'screen',
+  overlay: 'overlay',
+  darken: 'darken',
+  lighten: 'lighten',
+  'color-dodge': 'color-dodge',
+  'color-burn': 'color-burn',
+  'hard-light': 'hard-light',
+  'soft-light': 'soft-light',
+  difference: 'difference',
+  exclusion: 'exclusion',
+  hue: 'hue',
+  saturation: 'saturation',
+  color: 'color',
+  luminosity: 'luminosity',
+};
+
+/** Nama blend Alight Motion → globalCompositeOperation canvas (default source-over). */
+export function blendToComposite(blending: string | undefined): GlobalCompositeOperation {
+  return ((blending && BLEND_MAP[blending.toLowerCase()]) || 'source-over') as GlobalCompositeOperation;
+}
+
+function num(v: unknown, fallback = 0): number {
+  if (typeof v === 'number' && Number.isFinite(v)) return v;
+  if (typeof v === 'string' && v.trim() !== '') {
+    const n = Number(v.trim());
+    if (Number.isFinite(n)) return n;
+  }
+  return fallback;
+}
+
+function nums(v: unknown): number[] {
+  if (typeof v !== 'string') return [];
+  return v
+    .split(/[\s,]+/)
+    .filter(Boolean)
+    .map((x) => Number(x))
+    .filter((x) => Number.isFinite(x));
+}
+
+const attr = (el: El | undefined, name: string): string | undefined => {
+  const v = el?.attrs[name];
+  return v === undefined || v.trim() === '' ? undefined : v;
+};
+const kids = (el: El | undefined, name: string): El[] => (el ? el.children.filter((c) => c.tag === name) : []);
+
+/** Decode referensi karakter numerik (&#120293; / &#x1D5E5;) yang tidak diurus parser. */
+function decodeNumericEntities(v: string): string {
+  return v.replace(/&#(x[0-9a-f]+|\d+);/gi, (m, code: string) => {
+    const n = code[0] === 'x' || code[0] === 'X' ? parseInt(code.slice(1), 16) : parseInt(code, 10);
+    return Number.isFinite(n) && n > 0 && n <= 0x10ffff ? String.fromCodePoint(n) : m;
+  });
+}
+
+/** Ubah keluaran preserveOrder fast-xml-parser menjadi pohon El. */
+function toTree(items: unknown): El[] {
+  if (!Array.isArray(items)) return [];
+  const out: El[] = [];
+  for (const item of items) {
+    if (!item || typeof item !== 'object') continue;
+    const rec = item as Record<string, unknown>;
+    const tag = Object.keys(rec).find((k) => k !== ':@' && k !== '#text');
+    if (!tag) continue;
+    const attrs: Record<string, string> = {};
+    const raw = rec[':@'];
+    if (raw && typeof raw === 'object') {
+      for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+        attrs[k.replace(/^@_/, '')] = decodeNumericEntities(String(v));
+      }
+    }
+    out.push({ tag, attrs, children: toTree(rec[tag]) });
+  }
+  return out;
+}
+
+/** "#aarrggbb" (format Alight Motion) atau "#rrggbb" → css rgba()/hex. */
+export function argbToCss(value: string | undefined, fallback = '#888888'): string {
+  if (!value) return fallback;
+  const v = value.trim();
+  const m = /^#?([0-9a-f]{8})$/i.exec(v);
+  if (m) {
+    const n = parseInt(m[1], 16);
+    const a = ((n >>> 24) & 255) / 255;
+    return `rgba(${(n >>> 16) & 255},${(n >>> 8) & 255},${n & 255},${a.toFixed(3)})`;
+  }
+  return /^#?[0-9a-f]{6}$/i.test(v) ? `#${v.replace('#', '')}` : fallback;
+}
+
+function parseEasing(e: string | undefined, unknown: Set<string>): { e?: Keyframe['e']; ease?: Keyframe['ease'] } {
+  if (!e) return {};
+  const text = e.trim();
+  const m = /^cubicBezier\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)$/i.exec(text);
+  if (m) {
+    const q = [m[1], m[2], m[3], m[4]].map(Number);
+    if (q.every((x) => Number.isFinite(x))) return { e: q as [number, number, number, number] };
+  }
+  const el = /^(reverse\s+)?elastic((?:\s+\S+)*)$/i.exec(text);
+  if (el) {
+    const p = el[2].trim().split(/\s+/).map(Number).filter((x) => Number.isFinite(x));
+    return { ease: { kind: 'elastic', reverse: Boolean(el[1]), p } };
+  }
+  unknown.add(text.split(/\s+/)[0]);
+  return {};
+}
+
+/** Baca <kf>; t fraksi → ms memakai durasi layer; diurutkan menurut waktu. */
+function readKeyframes(el: El, start: number, span: number, unknownEase: Set<string>): Keyframe[] {
+  const out: Keyframe[] = [];
+  for (const kf of kids(el, 'kf')) {
+    const v = nums(attr(kf, 'v'));
+    if (!v.length) continue;
+    out.push({ t: start + num(attr(kf, 't'), 0) * span, v, ...parseEasing(attr(kf, 'e'), unknownEase) });
+  }
+  return out.sort((a, b) => a.t - b.t);
+}
+
+function readEffect(e: El, index: number, start: number, span: number, unknownEase: Set<string>): LayerEffect {
+  const id = attr(e, 'id') ?? `fx-${index}`;
+  const params: Record<string, EffectParam> = {};
+  for (const p of kids(e, 'property')) {
+    const name = attr(p, 'name');
+    if (!name) continue;
+    const kfs = readKeyframes(p, start, span, unknownEase);
+    const raw = attr(p, 'value') ?? '';
+    const param: EffectParam = { value: kfs.length ? kfs[0].v : nums(raw), keyframes: kfs.length ? kfs : undefined, raw };
+    if (/^#[0-9a-f]{8}$/i.test(raw.trim())) {
+      const n = parseInt(raw.trim().slice(1), 16);
+      param.rgba = [((n >>> 16) & 255) / 255, ((n >>> 8) & 255) / 255, (n & 255) / 255, ((n >>> 24) & 255) / 255];
+    }
+    params[name] = param;
+  }
+  return { id, name: id.split('.').pop() ?? id, enabled: attr(e, 'enabled') !== 'false', params };
+}
+
+type Ctx = { warnings: string[]; unknownEase: Set<string>; unknownTransform: Set<string> };
+
+function parseLayer(el: El, index: number, sceneDuration: number, ctx: Ctx): Layer {
+  const tag = el.tag;
+  const start = num(attr(el, 'startTime'), 0);
+  const endRaw = attr(el, 'endTime');
+  const end = Math.max(endRaw !== undefined ? num(endRaw) : sceneDuration, start + 1);
+  const span = end - start;
+
+  const rawFill = attr(el, 'fillType');
+  const fillType = (rawFill === 'media' || rawFill === 'color' || rawFill === 'gradient' ? rawFill : undefined) as Layer['fillType'] | undefined;
+  const videoRef = attr(el, 'fillVideo');
+  // Layer video menyimpan rujukannya di fillVideo; gambar di fillImage; audio di src.
+  const srcRef = videoRef ?? (fillType === 'media' || tag !== 'shape' ? attr(el, 'fillImage') : undefined) ?? attr(el, 'src') ?? null;
+
+  let type: LayerType = LAYER_TAGS[tag.toLowerCase()] ?? 'other';
+  if (tag === 'shape' && (fillType === 'media' || videoRef)) {
+    type = videoRef || /\/video\//i.test(srcRef ?? '') || /\.(mp4|mov|webm|mkv)$/i.test(srcRef ?? '') ? 'video' : 'image';
+  }
+  const label = attr(el, 'label') ?? attr(el, 'name');
+
+  // ── transform ──
+  const keyframes: Record<string, Keyframe[]> = {};
+  const staticVals: Record<string, number[]> = {};
+  const transform = kids(el, 'transform')[0];
+  for (const child of transform?.children ?? []) {
+    if (!['location', 'scale', 'rotation', 'opacity'].includes(child.tag)) {
+      ctx.unknownTransform.add(child.tag);
+      continue;
+    }
+    const kfs = readKeyframes(child, start, span, ctx.unknownEase);
+    if (kfs.length) keyframes[child.tag] = kfs;
+    const val = attr(child, 'value');
+    if (val !== undefined) staticVals[child.tag] = nums(val);
+  }
+  const first = (prop: string, fb: number[]): number[] => keyframes[prop]?.[0]?.v ?? staticVals[prop] ?? fb;
+  const loc = first('location', [0, 0]);
+  const scl = first('scale', [1, 1]);
+  const rot = first('rotation', [0]);
+  const opa = first('opacity', [1]);
+
+  // ── properti bentuk ──
+  let width = 0;
+  let height = 0;
+  let cornerRadius = 0;
+  for (const p of kids(el, 'property')) {
+    const name = attr(p, 'name');
+    const val = nums(attr(p, 'value'));
+    if (name === 'size' && val.length >= 2) [width, height] = val;
+    if (name === 'cornerRadius' && val.length) cornerRadius = val[0];
+  }
+
+  // ── isian ──
+  const gradEl = kids(el, 'gradient')[0];
+  let gradient: Layer['gradient'];
+  if (gradEl) {
+    const s = nums(attr(gradEl, 'start'));
+    const e = nums(attr(gradEl, 'end'));
+    gradient = {
+      type: attr(gradEl, 'type') ?? 'linear',
+      startColor: argbToCss(attr(gradEl, 'startColor'), '#000000'),
+      endColor: argbToCss(attr(gradEl, 'endColor'), '#ffffff'),
+      start: [s[0] ?? 0, s[1] ?? 0],
+      end: [e[0] ?? 1, e[1] ?? 1],
+    };
+  }
+
+  const effects = kids(el, 'effect').map((e, i) => readEffect(e, i, start, span, ctx.unknownEase));
+
+  // ── anak layer (hanya kontainer) ──
+  let embed: Scene | undefined;
+  if (tag.toLowerCase() === 'embedscene') {
+    const inner = kids(el, 'scene')[0];
+    if (inner) {
+      embed = parseSceneEl(inner, 'xml', ctx);
+      ctx.warnings.push(...embed.warnings.filter((w) => !ctx.warnings.includes(w)));
+      embed.warnings = [];
+    }
+  }
+
+  const strokeEl = kids(el, 'path-stroke')[0];
+  const shadowEl = kids(el, 'shadow')[0];
+  const sizeOf = (n: El | undefined) => num(attr(kids(n, 'size')[0], 'value'), 0);
+
+  const childLayers = CONTAINER_TAGS.has(tag)
+    ? el.children
+        .filter((c) => c.tag.toLowerCase() in LAYER_TAGS)
+        .map((c, i) => parseLayer(c, i, span, ctx))
+    : [];
+
+  return {
+    id: attr(el, 'id') ?? `layer-${index}`,
+    name: label ?? `${tag} ${index + 1}`,
+    type,
+    start,
+    end,
+    visible: attr(el, 'hidden') !== 'true' && attr(el, 'visible') !== 'false',
+    hiddenInSource: attr(el, 'hidden') === 'true',
+    parent: attr(el, 'parent') ?? null,
+    inTime: attr(el, 'inTime') !== undefined ? num(attr(el, 'inTime')) : undefined,
+    outTime: attr(el, 'outTime') !== undefined ? num(attr(el, 'outTime')) : undefined,
+    speed: attr(el, 'speed') !== undefined ? num(attr(el, 'speed'), 1) : undefined,
+    embed,
+    shadow: shadowEl ? { size: sizeOf(shadowEl), direction: attr(shadowEl, 'direction') ?? 'outside' } : undefined,
+    stroke: strokeEl
+      ? {
+          color: argbToCss(attr(kids(strokeEl, 'color')[0], 'value'), '#ffffff'),
+          size: sizeOf(strokeEl),
+          direction: attr(strokeEl, 'direction') ?? 'centered',
+        }
+      : undefined,
+    x: loc[0] ?? 0,
+    y: loc[1] ?? 0,
+    scaleX: scl[0] ?? 1,
+    scaleY: scl[1] ?? scl[0] ?? 1,
+    rotation: rot[0] ?? 0,
+    opacity: Math.min(1, Math.max(0, opa[0] ?? 1)),
+    width: width || embed?.width || 0,
+    height: height || embed?.height || 0,
+    color: argbToCss(attr(kids(el, 'fillColor')[0], 'value'), '#3d4f9a'),
+    text: attr(el, 'text') ?? '',
+    mediaRef: srcRef,
+    effects,
+    keyframes,
+    children: childLayers,
+    raw: { ...el.attrs },
+    shape: attr(el, 's')?.replace(/^\./, ''),
+    cornerRadius,
+    fillType,
+    fillMode: attr(el, 'mediaFillMode'),
+    gradient,
+    blending: attr(el, 'blending'),
+  };
+}
+
+function flatten(layers: Layer[]): Layer[] {
+  const out: Layer[] = [];
+  for (const l of layers) {
+    out.push(l);
+    if (l.children.length) out.push(...flatten(l.children));
+  }
+  return out;
+}
+
+/**
+ * Efek yang punya shader di renderer WebGL (lib/gl-renderer.ts). Semuanya perkiraan berdasarkan
+ * nama & nilai parameter — implementasi asli Alight Motion tidak dipublikasikan.
+ */
+export const SUPPORTED_EFFECTS = [
+  'gaussianblur', 'hueshift', 'exposure', 'satvib', 'sharpen', 'brightcont', 'lumakey',
+  'tile', 'wipe', 'wavewarp', 'randomdisplace', 'zoomblur', 'circularripple', 'displacemap',
+  'stretchsegment', 'mirror', 'gradientoverlay', 'fourcolorgradient',
+  'oscillate', 'swing', 'motionblur', 'lift', 'fade',
+];
+/** Dipertahankan agar kode lama yang mengimpor nama ini tetap jalan. */
+export const APPROXIMATED_EFFECTS = SUPPORTED_EFFECTS;
+
+export const effectBase = (name: string) => name.replace(/\d+$/, '');
+
+/** Semua layer termasuk yang ada di scene bersarang (embedScene). */
+export function flattenAll(layers: Layer[]): Layer[] {
+  const out: Layer[] = [];
+  for (const l of layers) {
+    out.push(l);
+    if (l.children.length) out.push(...flattenAll(l.children));
+    if (l.embed) out.push(...flattenAll(l.embed.layers));
+  }
+  return out;
+}
+
+function buildScene(root: El, source: Scene['source'], ctx: Ctx): Scene {
+  const width = Math.round(num(attr(root, 'width'), 0)) || 1080;
+  const height = Math.round(num(attr(root, 'height'), 0)) || 1920;
+  const fps = Math.min(120, Math.max(1, Math.round(num(attr(root, 'fps'), 30))));
+  const totalTime = num(attr(root, 'totalTime'), 0);
+
+  const layers: Layer[] = [];
+  const skipped = new Set<string>();
+  const mediaInfo: Record<string, MediaInfo> = {};
+  root.children.forEach((c) => {
+    const tag = c.tag.toLowerCase();
+    if (tag === 'bookmark') return;
+    if (tag === 'media') {
+      const uri = attr(c, 'uri');
+      if (uri) {
+        mediaInfo[uri] = {
+          filename: attr(c, 'filename'),
+          title: attr(c, 'title'),
+          type: attr(c, 'type'),
+          width: attr(c, 'width') ? num(attr(c, 'width')) : undefined,
+          height: attr(c, 'height') ? num(attr(c, 'height')) : undefined,
+          durationMs: attr(c, 'duration') ? num(attr(c, 'duration')) / 1000 : undefined,
+        };
+      }
+      return;
+    }
+    if (!(tag in LAYER_TAGS)) {
+      skipped.add(c.tag);
+      return;
+    }
+    layers.push(parseLayer(c, layers.length, totalTime || 5000, ctx));
+  });
+  if (skipped.size) ctx.warnings.push(`Elemen belum dikenali dan dilewati: ${[...skipped].map((t) => `<${t}>`).join(', ')}.`);
+
+  const all = flattenAll(layers);
+  const maxEnd = all.reduce((m, l) => Math.max(m, l.end), 0);
+  const duration = Math.round(totalTime > 0 ? totalTime : maxEnd || 5000);
+  const mediaRefs = Array.from(new Set(all.map((l) => l.mediaRef).filter((v): v is string => Boolean(v))));
+  const bookmarks = kids(root, 'bookmark')
+    .map((b) => num(attr(b, 't'), NaN))
+    .filter((t) => Number.isFinite(t))
+    .sort((a, b) => a - b);
+
+  return {
+    name: attr(root, 'title') ?? 'Preset tanpa nama',
+    width,
+    height,
+    fps,
+    duration,
+    layers,
+    mediaRefs,
+    effectCount: all.reduce((n, l) => n + l.effects.length, 0),
+    warnings: [],
+    source,
+    bgColor: argbToCss(attr(root, 'bgcolor'), '#000000'),
+    bookmarks,
+    mediaInfo: Object.keys(mediaInfo).length ? mediaInfo : undefined,
+  };
+}
+
+/** Dipakai parseLayer untuk <embedScene>. */
+function parseSceneEl(el: El, source: Scene['source'], ctx: Ctx): Scene {
+  return buildScene(el, source, ctx);
+}
+
+export function parseAmXml(text: string, source: Scene['source'] = 'xml'): Scene {
+  const body = text.replace(/^\uFEFF/, '').trim();
+  if (!body) throw new XmlError('File XML kosong.');
+  if (/^<!doctype html|^<html/i.test(body)) {
+    throw new XmlError('Isi file adalah halaman web (HTML), bukan XML preset.');
+  }
+
+  const parser = new XMLParser({
+    preserveOrder: true,
+    ignoreAttributes: false,
+    attributeNamePrefix: '@_',
+    allowBooleanAttributes: true,
+    parseAttributeValue: false,
+    parseTagValue: false,
+    trimValues: true,
+    processEntities: true,
+  });
+
+  let tree: El[];
+  try {
+    tree = toTree(parser.parse(body));
+  } catch {
+    throw new XmlError('XML tidak valid atau file terpotong.');
+  }
+
+  const root = tree.find((n) => n.tag === 'scene');
+  if (!root) {
+    throw new XmlError(
+      'Tidak ada elemen <scene> di XML ini. Pastikan file hasil "Export Project Package (XML)" dari Alight Motion.',
+    );
+  }
+
+  const ctx: Ctx = { warnings: [], unknownEase: new Set(), unknownTransform: new Set() };
+  const scene = buildScene(root, source, ctx);
+  if (!scene.layers.length) {
+    throw new XmlError('XML ini tidak berisi layer apa pun (shape/video/image/audio).');
+  }
+
+  const all = flattenAll(scene.layers);
+  const unsupported = new Map<string, number>();
+  for (const l of all) {
+    for (const fx of l.effects) {
+      const base = effectBase(fx.name);
+      if (!SUPPORTED_EFFECTS.includes(base)) unsupported.set(base, (unsupported.get(base) ?? 0) + 1);
+    }
+  }
+  const out = [...ctx.warnings];
+  if (unsupported.size) {
+    const list = [...unsupported.entries()].sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k} (${n})`);
+    out.push(`Efek ini belum punya implementasi (layer tampil tanpa efek tsb): ${list.join(', ')}.`);
+  }
+  const approx = new Set<string>();
+  for (const l of all) for (const fx of l.effects) if (SUPPORTED_EFFECTS.includes(effectBase(fx.name))) approx.add(effectBase(fx.name));
+  if (approx.size) {
+    out.push(
+      `Efek dirender sebagai PERKIRAAN (rumus asli Alight Motion tidak dipublikasikan): ${[...approx].join(', ')}.`,
+    );
+  }
+  if (ctx.unknownEase.size) out.push(`Kurva easing tak dikenal diperlakukan linear: ${[...ctx.unknownEase].join(', ')}.`);
+  if (ctx.unknownTransform.size) out.push(`Properti transform belum didukung: ${[...ctx.unknownTransform].join(', ')}.`);
+  if (scene.mediaRefs.length) {
+    out.push(
+      `Preset merujuk ${scene.mediaRefs.length} media dari perangkat asal (tidak ikut di file XML). Pasang media kamu di tab Media.`,
+    );
+  }
+  const hiddenVideo = all.filter((l) => l.type === 'video' && l.hiddenInSource);
+  if (hiddenVideo.length) {
+    out.push(
+      `Layer video "${hiddenVideo[0].name}" disembunyikan di preset aslinya. Nyalakan lewat Daftar layer kalau mau ditampilkan.`,
+    );
+  }
+  scene.warnings = out;
+  return scene;
+}
+
+/* ───────────── evaluasi keyframe (dipakai renderer & inspector) ───────────── */
+
+/** cubic-bezier gaya CSS: kembalikan y untuk progres x. */
+export function cubicBezier(x1: number, y1: number, x2: number, y2: number, x: number): number {
+  if (x <= 0) return 0;
+  if (x >= 1) return 1;
+  const cx = 3 * x1;
+  const bx = 3 * (x2 - x1) - cx;
+  const ax = 1 - cx - bx;
+  const cy = 3 * y1;
+  const by = 3 * (y2 - y1) - cy;
+  const ay = 1 - cy - by;
+  const sx = (t: number) => ((ax * t + bx) * t + cx) * t;
+  const sy = (t: number) => ((ay * t + by) * t + cy) * t;
+  const dx = (t: number) => (3 * ax * t + 2 * bx) * t + cx;
+  let t = x;
+  for (let i = 0; i < 8; i += 1) {
+    const err = sx(t) - x;
+    if (Math.abs(err) < 1e-6) return sy(t);
+    const d = dx(t);
+    if (Math.abs(d) < 1e-6) break;
+    t -= err / d;
+  }
+  let lo = 0;
+  let hi = 1;
+  t = x;
+  for (let i = 0; i < 40; i += 1) {
+    const v = sx(t);
+    if (Math.abs(v - x) < 1e-6) break;
+    if (v < x) lo = t;
+    else hi = t;
+    t = (lo + hi) / 2;
+  }
+  return sy(t);
+}
+
+/**
+ * Easing elastic. PERKIRAAN: p[0] dipakai sebagai periode osilasi (default 0.3); `reverse`
+ * dibaca sebagai ease-in (osilasi di awal segmen). Arti 3 parameter lain belum diketahui.
+ */
+export function elasticEase(x: number, reverse: boolean, p0: number): number {
+  const period = p0 > 0.05 && p0 < 2 ? p0 : 0.3;
+  const out = (u: number) => {
+    if (u <= 0) return 0;
+    if (u >= 1) return 1;
+    return Math.pow(2, -10 * u) * Math.sin(((u - period / 4) * 2 * Math.PI) / period) + 1;
+  };
+  return reverse ? 1 - out(1 - x) : out(x);
+}
+
+/** Nilai komponen `idx` dari keyframe pada waktu t (ms), dengan easing masuk. */
+export function sampleKeyframes(kfs: Keyframe[] | undefined, t: number, idx: number, fallback: number): number {
+  if (!kfs || !kfs.length) return fallback;
+  if (t <= kfs[0].t) return kfs[0].v[idx] ?? fallback;
+  const last = kfs[kfs.length - 1];
+  if (t >= last.t) return last.v[idx] ?? fallback;
+  for (let i = 0; i < kfs.length - 1; i += 1) {
+    const a = kfs[i];
+    const b = kfs[i + 1];
+    if (t >= a.t && t <= b.t) {
+      const span = b.t - a.t;
+      let k = span > 0 ? (t - a.t) / span : 1;
+      if (b.ease) k = elasticEase(k, b.ease.reverse, b.ease.p[0] ?? 0.3);
+      else if (b.e) k = cubicBezier(b.e[0], b.e[1], b.e[2], b.e[3], k);
+      const av = a.v[idx] ?? fallback;
+      const bv = b.v[idx] ?? fallback;
+      return av + (bv - av) * k;
+    }
+  }
+  return fallback;
+}
+
+export const valueAt = (layer: Layer, prop: string, t: number, fallback: number): number =>
+  sampleKeyframes(layer.keyframes[prop], t, 0, fallback);
+
+export const pairAt = (layer: Layer, prop: string, t: number, fx: number, fy: number): [number, number] => [
+  sampleKeyframes(layer.keyframes[prop], t, 0, fx),
+  sampleKeyframes(layer.keyframes[prop], t, 1, fy),
+];
